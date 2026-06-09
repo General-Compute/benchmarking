@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Convenience wrapper so you never have to `source venv/bin/activate`.
+# Usage (from anywhere):  ./benchmark run --workloads ctx_256 --iterations 5
+#
+# Runs the CLI inside the project's virtualenv automatically. If the venv is
+# missing it falls back to ./setup.sh to create it.
+set -euo pipefail
+
+# Resolve the directory this script lives in (so it works from any cwd).
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VENV_PY="$SCRIPT_DIR/venv/bin/python"
+
+if [[ ! -x "$VENV_PY" ]]; then
+  echo "No virtualenv found at $SCRIPT_DIR/venv — running setup..." >&2
+  if [[ -x "$SCRIPT_DIR/setup.sh" ]]; then
+    "$SCRIPT_DIR/setup.sh"
+  else
+    echo "Error: venv missing and no setup.sh to bootstrap it." >&2
+    exit 1
+  fi
+fi
+
+# Run from the project root so relative paths (config/, results/) always
+# resolve the same way, regardless of the caller's working directory.
+cd "$SCRIPT_DIR"
+
+# `-m benchmarking` uses the package's __main__, so this works even if the
+# `benchmark` entry point wasn't installed into the venv.
+exec "$VENV_PY" -m benchmarking "$@"

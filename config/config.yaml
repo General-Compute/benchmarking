@@ -1,0 +1,113 @@
+# GC Benchmarking configuration
+#
+# A "provider" is an inference endpoint. A "model" is a logical model that may
+# be hosted by several providers under different IDs. Each model is benchmarked
+# on every enabled provider that lists an ID for it. Comparisons are ONLY valid
+# within the same logical model (same model, different providers).
+
+providers:
+  general_compute:
+    name: "General Compute"
+    base_url_env: "GENERAL_COMPUTE_BASE_URL"
+    api_key_env: "GENERAL_COMPUTE_API_KEY"
+    # This endpoint expects `max_completion_tokens` instead of `max_tokens`
+    uses_max_completion_tokens: true
+    enabled: true
+
+  openrouter:
+    name: "OpenRouter"
+    base_url: "https://openrouter.ai/api/v1"
+    api_key_env: "OPENROUTER_API_KEY"
+    uses_max_completion_tokens: false
+    enabled: true
+    # Skip OpenRouter backends running on SN40 hardware (the RDU that General
+    # Compute uses, not a GPU) so we compare against GPU-based backends rather
+    # than the same silicon. allow_fallbacks lets it route to any other backend.
+    extra_body:
+      provider:
+        ignore: ["SambaNova", "Mara"]
+        allow_fallbacks: true
+
+# Per-provider model IDs. Verify these against live provider catalogs before
+# publishing claims based on new results.
+# Note: OpenRouter may route a request to any of several backends, so its
+# latency includes a routing hop and can vary by backend selection.
+models:
+  gpt-oss-120b:
+    reasoning: true
+    ids:
+      general_compute: "gpt-oss-120b"
+      openrouter: "openai/gpt-oss-120b"
+
+  minimax-m2.7:
+    reasoning: true
+    ids:
+      general_compute: "MiniMax-M2.7"
+      openrouter: "minimax/minimax-m2.7"
+
+  deepseek-v3.1:
+    reasoning: true
+    ids:
+      general_compute: "DeepSeek-V3.1"
+      openrouter: "deepseek/deepseek-chat-v3.1"
+
+  deepseek-v3.2:
+    reasoning: true
+    ids:
+      general_compute: "DeepSeek-V3.2"
+      openrouter: "deepseek/deepseek-v3.2"
+
+# Context-length sweep. Each workload is an input (prompt) size; output is
+# always capped at generation_params.max_tokens. Token counts are approximate
+# (tiktoken cl100k_base, not each model's native tokenizer).
+# All four models support 128k context, so every tier below is in-range.
+workloads:
+  ctx_256:
+    tokens: 256
+    template: "qa"
+    description: "256 input tokens"
+
+  ctx_1k:
+    tokens: 1024
+    template: "qa"
+    description: "1k input tokens"
+
+  ctx_4k:
+    tokens: 4096
+    template: "code"
+    description: "4k input tokens"
+
+  ctx_16k:
+    tokens: 16384
+    template: "code"
+    description: "16k input tokens"
+
+  ctx_64k:
+    tokens: 65536
+    template: "code"
+    description: "64k input tokens"
+
+  ctx_128k:
+    tokens: 131072
+    template: "code"
+    description: "128k input tokens"
+
+generation_params:
+  max_tokens: 1000
+  temperature: 0.0   # Deterministic — fair, reproducible generation
+  top_p: 1.0
+
+benchmark:
+  default_iterations: 50
+  warmup_iterations: 2          # Discarded; warms the connection + provider cache
+  timeout_seconds: 180
+  retry_attempts: 3
+  min_retry_wait: 2
+  max_retry_wait: 30
+  request_delay_seconds: 0.5    # Delay between requests to the same provider
+  vary_prompt: true             # Unique nonce per iteration to defeat prompt caching
+
+output:
+  results_dir: "./results"
+  csv_enabled: true
+  html_enabled: true
