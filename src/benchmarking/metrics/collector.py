@@ -37,7 +37,11 @@ class MetricsCollector:
         self._initialize_csv()
 
     def _initialize_csv(self) -> None:
-        if not self.csv_path.exists():
+        # Write the header when the file is missing OR exists but is empty.
+        # A leftover 0-byte file (e.g. from an interrupted/restarted run)
+        # would otherwise be appended to without ever getting a header,
+        # producing a headerless CSV that breaks report generation.
+        if not self.csv_path.exists() or self.csv_path.stat().st_size == 0:
             with open(self.csv_path, "w", newline="") as f:
                 csv.writer(f).writerow(CSV_HEADER)
 
@@ -88,37 +92,51 @@ class MetricsCollector:
                 return None
             return float(v)
 
-        with open(csv_path, "r") as f:
-            for row in csv.DictReader(f):
-                timestamp = datetime.fromisoformat(row["timestamp"])
-                if start_time is None or timestamp < start_time:
-                    start_time = timestamp
-                if end_time is None or timestamp > end_time:
-                    end_time = timestamp
+        with open(csv_path, "r", newline="") as f:
+            data_rows = [r for r in csv.reader(f) if r]
 
-                services.add(row["service_name"])
-                models.add(row.get("model_name", ""))
-                workloads.add(row["workload_type"])
-                iterations_per_workload = max(iterations_per_workload, int(row["iteration"]) + 1)
+        # Tolerate raw CSVs written without a header row. A genuine header
+        # begins with the literal "session_id" column name; anything else is
+        # treated as data and mapped positionally against CSV_HEADER. This
+        # lets us still produce reports from files an interrupted/restarted
+        # run left headerless.
+        if data_rows and data_rows[0][0] == CSV_HEADER[0]:
+            data_rows = data_rows[1:]
 
-                metrics.append(
-                    BenchmarkMetric(
-                        session_id=row["session_id"],
-                        service_name=row["service_name"],
-                        model_name=row.get("model_name", ""),
-                        workload_type=row["workload_type"],
-                        iteration=int(row["iteration"]),
-                        ttft_ms=_f(row.get("ttft_ms")),
-                        end_to_end_latency_ms=float(row["end_to_end_latency_ms"]),
-                        tokens_generated=int(row["tokens_generated"]),
-                        prompt_tokens=int(row["prompt_tokens"]),
-                        tokens_per_sec=_f(row.get("tokens_per_sec")),
-                        inter_token_latency_ms=_f(row.get("inter_token_latency_ms")),
-                        attempts=int(row.get("attempts") or 1),
-                        timestamp=timestamp,
-                        error=row["error"] if row["error"] else None,
-                    )
+        for raw in data_rows:
+            # Pad short rows so every column is present (mirrors DictReader's
+            # restval behaviour) before zipping into a name->value mapping.
+            padded = list(raw) + [""] * (len(CSV_HEADER) - len(raw))
+            row = dict(zip(CSV_HEADER, padded))
+            timestamp = datetime.fromisoformat(row["timestamp"])
+            if start_time is None or timestamp < start_time:
+                start_time = timestamp
+            if end_time is None or timestamp > end_time:
+                end_time = timestamp
+
+            services.add(row["service_name"])
+            models.add(row.get("model_name", ""))
+            workloads.add(row["workload_type"])
+            iterations_per_workload = max(iterations_per_workload, int(row["iteration"]) + 1)
+
+            metrics.append(
+                BenchmarkMetric(
+                    session_id=row["session_id"],
+                    service_name=row["service_name"],
+                    model_name=row.get("model_name", ""),
+                    workload_type=row["workload_type"],
+                    iteration=int(row["iteration"]),
+                    ttft_ms=_f(row.get("ttft_ms")),
+                    end_to_end_latency_ms=float(row["end_to_end_latency_ms"]),
+                    tokens_generated=int(row["tokens_generated"]),
+                    prompt_tokens=int(row["prompt_tokens"]),
+                    tokens_per_sec=_f(row.get("tokens_per_sec")),
+                    inter_token_latency_ms=_f(row.get("inter_token_latency_ms")),
+                    attempts=int(row.get("attempts") or 1),
+                    timestamp=timestamp,
+                    error=row["error"] if row["error"] else None,
                 )
+            )
 
         return BenchmarkSession(
             session_id=session_id,

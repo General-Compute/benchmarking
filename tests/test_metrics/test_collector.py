@@ -32,3 +32,32 @@ def test_metrics_collector_round_trips_result(tmp_path: Path) -> None:
     assert session.results[0].ttft_ms == 250.0
     assert session.results[0].end_to_end_latency_ms == 1500.0
     assert session.results[0].attempts == 2
+
+
+def test_load_session_tolerates_headerless_csv(tmp_path: Path) -> None:
+    """A raw CSV left headerless by an interrupted/restarted run must still
+    load (it previously crashed report generation with KeyError: 'timestamp')."""
+    csv_path = tmp_path / "session_legacy_raw.csv"
+    csv_path.write_text(
+        "legacy,Provider A,model-a,ctx_256,0,250.0,1500.0,100,25,80.0,12.5,1,"
+        "2026-06-09T18:15:05.451820+00:00,\n"
+    )
+
+    collector = MetricsCollector("legacy", str(tmp_path))
+    session = collector.load_session("legacy")
+
+    assert len(session.results) == 1
+    assert session.results[0].service_name == "Provider A"
+    assert session.results[0].tokens_generated == 100
+    assert session.results[0].error is None
+
+
+def test_initialize_csv_repairs_empty_file(tmp_path: Path) -> None:
+    """A pre-existing 0-byte session file must get a header written, otherwise
+    every subsequent append produces a headerless CSV."""
+    csv_path = tmp_path / "session_empty_raw.csv"
+    csv_path.write_text("")  # leftover 0-byte file
+
+    MetricsCollector("empty", str(tmp_path))
+
+    assert csv_path.read_text().startswith("session_id,")
