@@ -6,6 +6,16 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import AsyncIterator, Optional
 
+# A bare prompt (sent as one user message) or a full chat transcript.
+Prompt = str | list[dict[str, str]]
+
+
+def prompt_text(prompt: Prompt) -> str:
+    """Concatenated text of a prompt, for rough token-count fallbacks."""
+    if isinstance(prompt, str):
+        return prompt
+    return "\n".join(m.get("content", "") for m in prompt)
+
 
 @dataclass
 class StreamChunk:
@@ -36,6 +46,8 @@ class BenchmarkResult:
     service_name: str = ""  # provider display name
     model_name: str = ""  # logical model name
     workload_type: str = ""
+    content: str = ""  # visible response text (needed to continue agent transcripts)
+    step: int | None = None  # 1-based agent step; None for single-request workloads
 
 
 class BaseLLMClient(ABC):
@@ -56,7 +68,7 @@ class BaseLLMClient(ABC):
     @abstractmethod
     def stream_completion(
         self,
-        prompt: str,
+        prompt: Prompt,
         max_tokens: int,
         temperature: float,
         top_p: float,
@@ -106,7 +118,7 @@ class BaseLLMClient(ABC):
 
     async def benchmark_request(
         self,
-        prompt: str,
+        prompt: Prompt,
         max_tokens: int = 1000,
         temperature: float = 0.0,
         top_p: float = 1.0,
@@ -149,7 +161,7 @@ class BaseLLMClient(ABC):
                     full_content = "".join(content_parts)
                     tokens_generated = max(1, len(full_content) // 4)
                 if prompt_tokens == 0:
-                    prompt_tokens = len(prompt.split())
+                    prompt_tokens = len(prompt_text(prompt).split())
 
                 tps, itl = self._derive_throughput(ttft, end_to_end, tokens_generated)
 
@@ -166,6 +178,7 @@ class BaseLLMClient(ABC):
                     service_name=self.service_name,
                     model_name=model_name,
                     workload_type=workload_type,
+                    content="".join(content_parts),
                 )
 
             except Exception as e:  # noqa: BLE001 — we record and optionally retry
@@ -180,7 +193,7 @@ class BaseLLMClient(ABC):
                     ttft=ttft,
                     end_to_end_latency=end_to_end,
                     tokens_generated=0,
-                    prompt_tokens=len(prompt.split()),
+                    prompt_tokens=len(prompt_text(prompt).split()),
                     tokens_per_sec=None,
                     inter_token_latency_ms=None,
                     request_timestamp=request_wallclock,

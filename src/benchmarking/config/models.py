@@ -1,9 +1,9 @@
 """Pydantic models for configuration and metrics."""
 
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class BenchmarkMetric(BaseModel):
@@ -23,6 +23,8 @@ class BenchmarkMetric(BaseModel):
     attempts: int = 1
     timestamp: datetime
     error: Optional[str] = None
+    # 1-based step within a multi-step agent task; None for single-request workloads.
+    step: int | None = None
 
 
 class BenchmarkSession(BaseModel):
@@ -62,11 +64,31 @@ class ModelConfig(BaseModel):
 
 
 class WorkloadConfig(BaseModel):
-    """Configuration for a workload."""
+    """Configuration for a workload.
+
+    ``kind: single`` (the default) sends one prompt of ``tokens`` input tokens.
+    ``kind: agent`` runs a multi-step agent task: the first request carries a
+    ``tokens``-sized context (system prompt, tool catalog, task), and every
+    later step re-sends the whole conversation plus the model's previous reply
+    and a ``step_tokens``-sized tool result, with output capped at
+    ``output_tokens`` per step.
+    """
 
     tokens: int
     template: str
     description: str = ""
+    kind: Literal["single", "agent"] = "single"
+    steps: int = Field(default=1, ge=1)
+    step_tokens: int = Field(default=0, ge=0)
+    output_tokens: int | None = Field(default=None, ge=1)
+
+    @model_validator(mode="after")
+    def _check_agent_fields(self) -> "WorkloadConfig":
+        if self.kind == "single" and (self.steps != 1 or self.step_tokens):
+            raise ValueError("steps and step_tokens only apply to kind: agent workloads")
+        if self.kind == "agent" and self.steps > 1 and self.step_tokens < 10:
+            raise ValueError("agent workloads with more than one step need step_tokens >= 10")
+        return self
 
 
 class GenerationParams(BaseModel):

@@ -10,7 +10,7 @@ from typing import Any, AsyncIterator, Optional
 
 from openai import AsyncOpenAI
 
-from .base import BaseLLMClient, StreamChunk
+from .base import BaseLLMClient, Prompt, StreamChunk
 
 
 class OpenAICompatibleClient(BaseLLMClient):
@@ -46,7 +46,7 @@ class OpenAICompatibleClient(BaseLLMClient):
 
     async def stream_completion(
         self,
-        prompt: str,
+        prompt: Prompt,
         max_tokens: int,
         temperature: float,
         top_p: float,
@@ -62,7 +62,9 @@ class OpenAICompatibleClient(BaseLLMClient):
         token_param = "max_completion_tokens" if self.uses_max_completion_tokens else "max_tokens"
         request_params: dict[str, Any] = {
             "model": self.model,
-            "messages": [{"role": "user", "content": prompt}],
+            "messages": (
+                [{"role": "user", "content": prompt}] if isinstance(prompt, str) else prompt
+            ),
             token_param: max_tokens,
             "temperature": temperature,
             "top_p": top_p,

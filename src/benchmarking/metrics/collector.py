@@ -23,6 +23,8 @@ CSV_HEADER = [
     "attempts",
     "timestamp",
     "error",
+    # Appended last so raw CSVs written before agent workloads still load.
+    "step",
 ]
 
 
@@ -68,6 +70,7 @@ class MetricsCollector:
                     result.attempts,
                     ts,
                     result.error or "",
+                    result.step if result.step is not None else "",
                 ]
             )
 
@@ -135,6 +138,7 @@ class MetricsCollector:
                     attempts=int(row.get("attempts") or 1),
                     timestamp=timestamp,
                     error=row["error"] if row["error"] else None,
+                    step=int(row["step"]) if row.get("step") else None,
                 )
             )
 

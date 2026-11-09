@@ -112,15 +112,58 @@ The default workloads are context-size sweeps:
 - `ctx_16k`: 16,384 input tokens
 - `ctx_64k`: 65,536 input tokens
 - `ctx_128k`: 131,072 input tokens
+- `agent_8step`: an 8-step agent task, see [Agent workloads](#agent-workloads)
 
 Token counts are approximate because prompts are generated with `tiktoken`
 `cl100k_base`, not each model provider's native tokenizer.
+
+### Agent workloads
+
+Context sweeps send one prompt and read a long answer. Agents do the opposite:
+every step re-sends a long, mostly unchanged transcript and asks for a short
+tool call, and the next step cannot start until that reply arrives. A
+workload with `kind: agent` benchmarks that loop:
+
+```yaml
+agent_8step:
+  kind: agent
+  tokens: 8192        # system prompt + tool catalog + reference text + task
+  template: "code"
+  steps: 8            # dependent requests per task
+  step_tokens: 1024   # tool result appended after each step
+  output_tokens: 128  # per-step output cap (overrides generation_params.max_tokens)
+```
+
+Step `k` sends the whole conversation so far: the system prompt and task, then
+for every earlier step the model's actual reply and a deterministic
+`step_tokens`-sized tool result. Every provider receives the same tool results
+in the same order. Steps run back to back with no simulated tool time, and a
+failed step ends the task.
+
+Methodology tradeoffs:
+
+- The per-iteration nonce goes at the start of the system prompt. Prefix
+  caching therefore cannot carry over between iterations, but it can help
+  within a task, the way it does for a real agent. `ttft_ms_step_1` is a cold
+  prefill; later steps show how much a provider reuses the shared prefix.
+- Replies differ between providers, so the transcripts diverge slightly after
+  step 1. Tool results, which are most of the added input, are identical.
+- For reasoning models, `output_tokens` also has to cover the reasoning trace.
+  If a step's budget runs out before any visible reply, a placeholder tool call
+  is appended so the transcript stays valid; raise `output_tokens` if you want
+  the models' real tool calls in the transcript.
+- Raw CSV rows are per step (`step` column, empty for single-request
+  workloads), so the existing per-request statistics treat each step as a
+  sample. The summary CSV adds task-level rows for agent workloads:
+  `task_completion_pct`, `task_latency_ms` (sum of step latencies for tasks
+  where every step succeeded), `task_ttft_ms`, and `ttft_ms_step_N` /
+  `prompt_tokens_step_N` for the first and last step.
 
 ## Outputs
 
 Results are written under `results/`:
 
-- `session_<id>_raw.csv`: one row per request
+- `session_<id>_raw.csv`: one row per request (agent workloads: one row per step)
 - `session_<id>_summary.csv`: aggregate statistics by model, provider, and workload
 - `session_<id>_report.html`: general HTML charts and tables
 - `session_<id>_provider_performance.html`: provider performance charts
