@@ -343,10 +343,14 @@ def workloads() -> None:
         table = Table(title="Workloads")
         table.add_column("Workload", style="cyan")
         table.add_column("Tokens", style="green")
+        table.add_column("Steps", style="magenta")
         table.add_column("Template", style="yellow")
         table.add_column("Description", style="white")
         for name, cfg in settings.get_all_workload_configs().items():
-            table.add_row(name, str(cfg.tokens), cfg.template, cfg.description)
+            tokens = str(cfg.tokens)
+            if cfg.kind == "agent" and cfg.steps > 1:
+                tokens += f" (+{cfg.step_tokens}/step)"
+            table.add_row(name, tokens, str(cfg.steps), cfg.template, cfg.description)
         console.print()
         console.print(table)
         console.print()

@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, List, Optional
 
 from ..config.models import BenchmarkSession
+from ..metrics.agent_tasks import AgentTask, expected_steps, group_agent_tasks
 from ..metrics.statistics import StatisticalAnalyzer
 
 
@@ -41,6 +42,7 @@ class CSVReporter:
                 ]
             )
 
+            agent_tasks = group_agent_tasks(session.results)
             for model in session.models:
                 for service in session.services:
                     for workload in session.workloads:
@@ -113,8 +115,61 @@ class CSVReporter:
                             "tokens_generated",
                             [float(r.tokens_generated) for r in succeeded],
                         )
+                        tasks = agent_tasks.get((model, service, workload))
+                        if tasks:
+                            self._write_agent_metrics(writer, model, service, workload, tasks)
 
         return output_path
+
+    def _write_agent_metrics(
+        self, writer: Any, model: str, service: str, workload: str, tasks: list[AgentTask]
+    ) -> None:
+        """Task-level rows for an agent workload.
+
+        Per-request rows above treat every step as a sample. These rows answer
+        the agent question instead: how long a whole task takes, how often it
+        finishes, and how TTFT grows from the first step to the last as the
+        re-sent context gets longer.
+        """
+        n_steps = expected_steps(tasks)
+        complete = [t for t in tasks if t.is_complete(n_steps)]
+        self._write_metric(
+            writer,
+            model,
+            service,
+            workload,
+            "task_completion_pct",
+            [100.0 * len(complete) / len(tasks)],
+        )
+        self._write_metric(
+            writer, model, service, workload, "task_latency_ms", [t.latency_ms for t in complete]
+        )
+        self._write_metric(
+            writer,
+            model,
+            service,
+            workload,
+            "task_ttft_ms",
+            [t.ttft_ms for t in complete if t.ttft_ms is not None],
+        )
+        for number in sorted({1, n_steps}):
+            steps = [t.step(number) for t in complete]
+            self._write_metric(
+                writer,
+                model,
+                service,
+                workload,
+                f"ttft_ms_step_{number}",
+                [s.ttft_ms for s in steps if s is not None and s.ttft_ms is not None],
+            )
+            self._write_metric(
+                writer,
+                model,
+                service,
+                workload,
+                f"prompt_tokens_step_{number}",
+                [float(s.prompt_tokens) for s in steps if s is not None],
+            )
 
     def _write_metric(
         self,

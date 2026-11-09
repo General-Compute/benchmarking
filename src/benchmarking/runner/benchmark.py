@@ -13,9 +13,17 @@ from rich.progress import (
     TimeElapsedColumn,
 )
 
+from ..clients.base import BaseLLMClient, BenchmarkResult, Prompt
 from ..clients.openai_compatible import OpenAICompatibleClient
+from ..config.models import BenchmarkConfig, GenerationParams, WorkloadConfig
 from ..config.settings import Settings
 from ..metrics.collector import MetricsCollector
+from ..workloads.agent import (
+    agent_system_prompt,
+    continue_transcript,
+    initial_messages,
+    tool_result,
+)
 from ..workloads.generator import PromptGenerator
 
 
@@ -59,6 +67,69 @@ class BenchmarkRunner:
         comparison stays fair while no provider benefits from cache hits.
         """
         return f"[run {iteration:05d}] {prompt}"
+
+    def _base_prompt(self, workload: WorkloadConfig) -> str:
+        """The single-request prompt, or the agent system prompt for agent workloads."""
+        if workload.kind == "agent":
+            return agent_system_prompt(self.prompt_generator, workload.tokens, workload.template)
+        return self.prompt_generator.generate_prompt(
+            target_tokens=workload.tokens, template=workload.template
+        )
+
+    def _tool_results(self, workload: WorkloadConfig) -> list[str]:
+        """Tool outputs fed back after steps 1..steps-1 (same for every provider)."""
+        if workload.kind != "agent":
+            return []
+        return [
+            tool_result(self.prompt_generator, step, workload.step_tokens)
+            for step in range(1, workload.steps)
+        ]
+
+    @staticmethod
+    def _first_request(workload: WorkloadConfig, prompt: str) -> Prompt:
+        return initial_messages(prompt) if workload.kind == "agent" else prompt
+
+    @staticmethod
+    async def _run_agent_task(
+        client: BaseLLMClient,
+        workload: WorkloadConfig,
+        workload_name: str,
+        model_name: str,
+        system_prompt: str,
+        tool_results: list[str],
+        gen_params: GenerationParams,
+        bench_cfg: BenchmarkConfig,
+    ) -> list[BenchmarkResult]:
+        """Run one agent task: ``workload.steps`` dependent requests, back to back.
+
+        Each step re-sends the whole transcript, so later steps measure how a
+        provider handles a long, mostly repeated prefix. The nonce is only in
+        the system prompt, so prefix caching can help within a task (as it
+        does for real agents) but not across iterations. A failed step ends
+        the task, because later steps would depend on a reply that never came.
+        """
+        messages = initial_messages(system_prompt)
+        max_tokens = workload.output_tokens or gen_params.max_tokens
+        results: list[BenchmarkResult] = []
+        for step in range(1, workload.steps + 1):
+            result = await client.benchmark_request(
+                prompt=messages,
+                max_tokens=max_tokens,
+                temperature=gen_params.temperature,
+                top_p=gen_params.top_p,
+                workload_type=workload_name,
+                model_name=model_name,
+                max_attempts=bench_cfg.retry_attempts,
+                min_retry_wait=bench_cfg.min_retry_wait,
+                max_retry_wait=bench_cfg.max_retry_wait,
+            )
+            result.step = step
+            results.append(result)
+            if result.error is not None:
+                break
+            if step < workload.steps:
+                messages = continue_transcript(messages, result.content, tool_results[step - 1])
+        return results
 
     async def run_benchmark(
         self,
@@ -122,10 +193,8 @@ class BenchmarkRunner:
 
             for workload_name, model_name, model_cfg, hosts in cells:
                 workload_config = self.settings.get_workload_config(workload_name)
-                base_prompt = self.prompt_generator.generate_prompt(
-                    target_tokens=workload_config.tokens,
-                    template=workload_config.template,
-                )
+                base_prompt = self._base_prompt(workload_config)
+                tool_results = self._tool_results(workload_config)
 
                 clients: Dict[str, OpenAICompatibleClient] = {
                     p: self._make_client(p, model_cfg.ids[p]) for p in hosts
@@ -137,7 +206,9 @@ class BenchmarkRunner:
                         for provider_name, client in clients.items():
                             try:
                                 await client.benchmark_request(
-                                    prompt=self._vary_prompt(base_prompt, -1),
+                                    prompt=self._first_request(
+                                        workload_config, self._vary_prompt(base_prompt, -1)
+                                    ),
                                     max_tokens=min(64, gen_params.max_tokens),
                                     temperature=gen_params.temperature,
                                     top_p=gen_params.top_p,
@@ -163,18 +234,31 @@ class BenchmarkRunner:
                                     f"{workload_name} ({iteration + 1}/{iterations})"
                                 ),
                             )
-                            result = await client.benchmark_request(
-                                prompt=prompt,
-                                max_tokens=gen_params.max_tokens,
-                                temperature=gen_params.temperature,
-                                top_p=gen_params.top_p,
-                                workload_type=workload_name,
-                                model_name=model_name,
-                                max_attempts=bench_cfg.retry_attempts,
-                                min_retry_wait=bench_cfg.min_retry_wait,
-                                max_retry_wait=bench_cfg.max_retry_wait,
-                            )
-                            collector.save_result(result, iteration)
+                            if workload_config.kind == "agent":
+                                for step_result in await self._run_agent_task(
+                                    client,
+                                    workload_config,
+                                    workload_name,
+                                    model_name,
+                                    prompt,
+                                    tool_results,
+                                    gen_params,
+                                    bench_cfg,
+                                ):
+                                    collector.save_result(step_result, iteration)
+                            else:
+                                result = await client.benchmark_request(
+                                    prompt=prompt,
+                                    max_tokens=gen_params.max_tokens,
+                                    temperature=gen_params.temperature,
+                                    top_p=gen_params.top_p,
+                                    workload_type=workload_name,
+                                    model_name=model_name,
+                                    max_attempts=bench_cfg.retry_attempts,
+                                    min_retry_wait=bench_cfg.min_retry_wait,
+                                    max_retry_wait=bench_cfg.max_retry_wait,
+                                )
+                                collector.save_result(result, iteration)
                             progress.update(main_task, advance=1)
                             await asyncio.sleep(bench_cfg.request_delay_seconds)
                 finally:
@@ -207,10 +291,9 @@ class BenchmarkRunner:
         gen_params = self.settings.get_generation_params()
         bench_cfg = self.settings.get_benchmark_config()
         workload_config = self.settings.get_workload_config(workload_name)
-        prompt = self.prompt_generator.generate_prompt(
-            target_tokens=workload_config.tokens,
-            template=workload_config.template,
-        )
+        prompt = self._base_prompt(workload_config)
+        tool_results = self._tool_results(workload_config)
+        task_latencies_ms: list[float] = []
 
         client = self._make_client(provider_name, model_cfg.ids[provider_name])
         results = []
@@ -223,6 +306,27 @@ class BenchmarkRunner:
             ) as progress:
                 task = progress.add_task("Testing...", total=iterations)
                 for i in range(iterations):
+                    if workload_config.kind == "agent":
+                        steps = await self._run_agent_task(
+                            client,
+                            workload_config,
+                            workload_name,
+                            model_name,
+                            self._vary_prompt(prompt, i),
+                            tool_results,
+                            gen_params,
+                            bench_cfg,
+                        )
+                        results.extend(steps)
+                        if len(steps) == workload_config.steps and all(
+                            s.error is None for s in steps
+                        ):
+                            task_latencies_ms.append(
+                                sum(s.end_to_end_latency for s in steps) * 1000
+                            )
+                        progress.update(task, advance=1)
+                        await asyncio.sleep(bench_cfg.request_delay_seconds)
+                        continue
                     results.append(
                         await client.benchmark_request(
                             prompt=self._vary_prompt(prompt, i),
@@ -243,8 +347,15 @@ class BenchmarkRunner:
 
         successful = [r for r in results if r.error is None]
         failed = [r for r in results if r.error is not None]
-        self.console.print(f"\nSuccessful: {len(successful)}/{iterations}")
-        self.console.print(f"Failed: {len(failed)}/{iterations}\n")
+        self.console.print(f"\nSuccessful requests: {len(successful)}/{len(results)}")
+        self.console.print(f"Failed requests: {len(failed)}/{len(results)}\n")
+        if workload_config.kind == "agent":
+            self.console.print(f"Completed tasks: {len(task_latencies_ms)}/{iterations}")
+            if task_latencies_ms:
+                mean_task = sum(task_latencies_ms) / len(task_latencies_ms)
+                self.console.print(
+                    f"Average task latency ({workload_config.steps} steps): {mean_task:.2f} ms"
+                )
 
         if successful:
             ttfts = [r.ttft * 1000 for r in successful if r.ttft is not None]

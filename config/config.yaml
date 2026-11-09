@@ -92,6 +92,18 @@ workloads:
     template: "code"
     description: "128k input tokens"
 
+  # Multi-step agent task: each step re-sends the whole transcript (system
+  # prompt + tool catalog + prior replies + tool results) and asks for a short
+  # tool call. Last step's input is ~8k + 7 x (1k + reply) tokens.
+  agent_8step:
+    kind: agent
+    tokens: 8192
+    template: "code"
+    steps: 8
+    step_tokens: 1024
+    output_tokens: 128
+    description: "8-step agent task, 8k context, +1k tool result per step"
+
 generation_params:
   max_tokens: 1000
   temperature: 0.0   # Deterministic — fair, reproducible generation
